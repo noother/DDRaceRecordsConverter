@@ -1,0 +1,274 @@
+#!/usr/bin/php
+<?php
+
+class DDRaceRecordsConverter {
+	
+	private $directory = './';
+	private $prefix = false;
+	private $MySQL;
+	
+	private $counter = 0;
+	
+	function __construct($directory='./') {
+		$this->directory = $directory;
+		$data = $this->getData();
+		
+		$this->MySQL = new MySQL($data['host'], $data['user'], $data['password'], $data['db']);
+		$files = libFilesystem::getFiles($directory, 'dtb');
+		foreach($files as $file) {
+			if(!preg_match('/^.+?_record\.dtb$/D', $file)) continue;
+			$this->convertFromFileToSql($file);
+		}
+		
+		echo "\n\nall done. Inserted ".$this->counter." records\n\n";
+	}
+	
+	public function convertFromFileToSql($file) {
+		echo "Getting records from ".$file."\n";
+		$records = $this->getRecords($file);
+		$table = $this->getSQLTable($file);
+		$this->insertRecords($table, $records);
+		echo "\n";
+	}
+	
+	private function getData() {
+		$data = array();
+		echo "This tool will let you convert teeworlds ddrace records stored in files to the MySQL method of storing records.\n";
+		echo "Put it into your records directory, or call it with ./recordsconverter <path>\n";
+		echo "Written by noother\n";
+		echo "------------------\n";
+		echo "Now, please input some data from your .cfg\n\n";
+		echo "MySQL-Host: ";
+		$data['host'] = trim(fgets(STDIN));
+		echo "MySQL-User: ";
+		$data['user'] = trim(fgets(STDIN));
+		echo "MySQL-Password: ";
+		$data['password'] = trim(fgets(STDIN));
+		echo "Database: ";
+		$data['db'] = trim(fgets(STDIN));
+		echo "Table Prefix: ";
+		$prefix = trim(fgets(STDIN));
+		if(!empty($prefix)) $this->prefix = $prefix;
+		echo "\nThanks\n\n";
+		
+	return $data;
+	}
+	
+	private function getRecords($filename) {
+		$timestamp = date('Y-m-d H:i:s');
+		
+		$records = array();
+		$file = file($this->directory.$filename, FILE_IGNORE_NEW_LINES);
+		for($x=0,$l=sizeof($file);$x<$l;$x+=3) {
+			$record = array(
+				'Name' => $file[$x],
+				'Timestamp' => $timestamp,
+				'Time'   => $file[$x+1]
+			);
+			$checkpoints = explode(' ', $file[$x+2], 25);
+			$checkpoints[24] = trim($checkpoints[24]);
+			foreach($checkpoints as $id => $checkpoint) {
+				$record['cp'.($id+1)] = $checkpoint;
+			}
+			$records[] = $record;
+		}
+	
+	return $records;
+	}
+	
+	private function getSQLTable($filename) {
+		preg_match('/^(.+?)_record\.dtb$/D', $filename, $arr);
+		$mapname = $arr[1];
+		
+		$valid_chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_';
+		$table = '';
+		for($i=0,$l=strlen($mapname);$i<$l;$i++) {
+			if(false !== strpos($valid_chars, $mapname{$i})) {
+				$table.= $mapname{$i};
+			} else {
+				$table.= '_';
+			}
+		}
+		
+		$table.='_race';
+		
+		if($this->prefix !== false) $table = $this->prefix.'_'.$table;
+		
+	return $table;
+	}
+	
+	private function insertRecords($table, $records) {
+		$this->createTable($table);
+		$sql_template = "INSERT INTO ".$table." (%s) VALUES (%s)";
+		
+		foreach($records as $record) {
+			if($this->recordExists($table, $record)) {
+				echo "Skipping ".$record['Name']." => ".$record['Time']."\n";
+				continue;
+			}
+			echo "Inserting ".$record['Name']." => ".$record['Time']."\n";
+			$columns = array();
+			$values  = array();
+			foreach($record as $column => $value) {
+				$columns[] = '`'.$column.'`';
+				$values[] = "'".addslashes($value)."'";
+			}
+			
+			$sql = sprintf($sql_template,
+				implode(', ', $columns),
+				implode(', ', $values)
+			);
+			$this->MySQL->query($sql);
+			$this->counter++;
+		}
+	}
+	
+	private function recordExists($table, $record) {
+		$sql = "SELECT `Time` FROM ".$table." WHERE `Name` = '".addslashes($record['Name'])."'";
+		$res = $this->MySQL->query($sql);
+		foreach($res as $row) {
+			if($row['Time'] == $record['Time']) return true;
+		}
+		
+	return false;
+	}
+	
+	private function createTable($table) {
+		// ported from ddrace source
+		$sql = "CREATE TABLE IF NOT EXISTS ".$table." (Name VARCHAR(16) NOT NULL, Timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP , Time FLOAT DEFAULT 0, cp1 FLOAT DEFAULT 0, cp2 FLOAT DEFAULT 0, cp3 FLOAT DEFAULT 0, cp4 FLOAT DEFAULT 0, cp5 FLOAT DEFAULT 0, cp6 FLOAT DEFAULT 0, cp7 FLOAT DEFAULT 0, cp8 FLOAT DEFAULT 0, cp9 FLOAT DEFAULT 0, cp10 FLOAT DEFAULT 0, cp11 FLOAT DEFAULT 0, cp12 FLOAT DEFAULT 0, cp13 FLOAT DEFAULT 0, cp14 FLOAT DEFAULT 0, cp15 FLOAT DEFAULT 0, cp16 FLOAT DEFAULT 0, cp17 FLOAT DEFAULT 0, cp18 FLOAT DEFAULT 0, cp19 FLOAT DEFAULT 0, cp20 FLOAT DEFAULT 0, cp21 FLOAT DEFAULT 0, cp22 FLOAT DEFAULT 0, cp23 FLOAT DEFAULT 0, cp24 FLOAT DEFAULT 0, cp25 FLOAT DEFAULT 0, KEY Name (Name)) CHARACTER SET utf8";
+		$this->MySQL->query($sql);
+		
+		$sql = "SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = '".$table."' AND column_name = 'Timestamp'";
+		$res = $this->MySQL->fetchColumn($sql);
+		if($res === false) {
+			$sql = "ALTER TABLE ".$table." ADD Timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER Name, ADD INDEX(Name)";
+			$this->MySQL->query($sql);
+		}
+	}
+	
+}
+
+class libFilesystem {
+	
+	static function getFiles($dir, $extension=false) {
+		$files = array();
+		
+		$dir = opendir($dir);
+		while($file = readdir($dir)) {
+			if(in_array($file, array('.', '..'))) continue;
+			if(is_dir($file)) continue;
+			if($extension) {
+				$tmp = explode('.', $file);
+				if($tmp[sizeof($tmp)-1] != $extension) continue;
+			}
+			$files[] = $file;
+		}
+		
+		sort($files);
+		
+	return $files;
+	}
+	
+}
+
+class MySQL {
+	
+	
+	private $host;
+	private $user;
+	private $password;
+	private $db;
+	private $port;
+	
+	private $Instance=false;
+	
+	function __construct($host, $user, $password, $db, $port=3306) {
+		$this->host     = $host;
+		$this->user     = $user;
+		$this->password = $password;
+		$this->db       = $db;
+		$this->port     = $port;
+	}
+	
+	private function connect() {
+		$this->Instance = new mysqli($this->host,$this->user,$this->password,$this->db);
+		if($this->Instance->connect_error) die($this->Instance->connect_error);
+		$this->query("set character set utf8");
+	}
+	
+	public function query($sql, $mode='assoc') {
+		if(!$this->Instance) {
+			$this->connect();
+		}
+		
+		if(false === $Result = $this->Instance->query($sql)) {
+			if($this->Instance->error == 'MySQL server has gone away') {
+				$this->connect();
+				return $this->query($sql);
+			} else {
+				die("\nMySQL Error: ".$this->Instance->error."\n");
+			}
+		}
+		
+		preg_match('/^\s*(\w+)/', strtoupper($sql), $arr);
+		
+		switch($arr[1]) {
+			case 'SELECT': case 'SHOW':
+				$return = array();
+				
+				switch($mode) {
+					case 'assoc':
+						while($row = $Result->fetch_assoc()) $return[] = $row;
+					break;
+					case 'numeric':
+						while($row = $Result->fetch_row()) $return[] = $row;
+					break;
+					case 'both':
+						while($row = $Result->fetch_array()) $return[] = $row;
+					break;
+				}
+			break;
+			case 'INSERT':
+				$return = $this->Instance->insert_id;
+			break;
+			case 'UPDATE':
+				$return = $this->Instance->affected_rows;
+			break;
+			default:
+				$return = true;
+			break;
+		}
+		
+	return $return;
+	}
+	
+	public function multiQuery($sql) {
+		$this->Instance->multi_query($sql);
+		do {
+			if($this->Instance->error) die("\nMySQL Error: ".$this->Instance->error."\n");
+			if(false !== $Result = $this->Instance->use_result()) $Result->close();
+		} while($this->Instance->more_results() && $this->Instance->next_result());
+		
+	return true;
+	}
+	
+	public function fetchColumn($sql) {
+		$res = $this->query($sql);
+		if(empty($res)) return false;
+		
+	return current($res[0]);
+	}
+	
+	public function fetchRow($sql, $mode='assoc') {
+		$res = $this->query($sql, $mode);
+		if(empty($res)) return false;
+		
+	return $res[0];
+	}
+	
+}
+
+
+new DDRaceRecordsConverter($argc > 1 ? $argv[1] : './');
+
+?>
